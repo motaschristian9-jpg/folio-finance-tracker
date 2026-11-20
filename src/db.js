@@ -1,0 +1,14 @@
+import initSqlJs from 'sql.js';
+import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
+let db;
+const KEY='folio-sqlite-v1';
+const openStore=()=>new Promise((resolve,reject)=>{const r=indexedDB.open('folio-local',1);r.onupgradeneeded=()=>r.result.createObjectStore('files');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+async function getSaved(){const store=await openStore();return new Promise((resolve,reject)=>{const tx=store.transaction('files');const req=tx.objectStore('files').get(KEY);req.onsuccess=()=>{resolve(req.result);store.close()};req.onerror=()=>reject(req.error)})}
+async function putSaved(bytes){const store=await openStore();return new Promise((resolve,reject)=>{const tx=store.transaction('files','readwrite');tx.objectStore('files').put(bytes,KEY);tx.oncomplete=()=>{store.close();resolve()};tx.onerror=()=>reject(tx.error)})}
+export async function initDB(){const SQL=await initSqlJs({locateFile:()=>wasmUrl});const saved=await getSaved();db=saved?new SQL.Database(new Uint8Array(saved)):new SQL.Database();db.run(`CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, amount REAL NOT NULL CHECK(amount>0), type TEXT NOT NULL CHECK(type IN ('income','expense')), category TEXT NOT NULL, date TEXT NOT NULL, note TEXT DEFAULT '');CREATE TABLE IF NOT EXISTS budgets (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT UNIQUE NOT NULL, amount REAL NOT NULL CHECK(amount>0));CREATE TABLE IF NOT EXISTS goals (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, target REAL NOT NULL CHECK(target>0), saved REAL NOT NULL DEFAULT 0 CHECK(saved>=0));CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);await persist();return true}
+async function persist(){await putSaved(db.export())}
+export function query(sql,params=[]){const stmt=db.prepare(sql);stmt.bind(params);const rows=[];while(stmt.step())rows.push(stmt.getAsObject());stmt.free();return rows}
+export async function execute(sql,params=[]){db.run(sql,params);await persist()}
+export async function batch(actions){db.run('BEGIN TRANSACTION');try{for(const [sql,params] of actions)db.run(sql,params||[]);db.run('COMMIT');await persist()}catch(e){db.run('ROLLBACK');throw e}}
+export function backup(){return new Blob([db.export()],{type:'application/x-sqlite3'})}
+export async function restore(file){const bytes=new Uint8Array(await file.arrayBuffer());const SQL=await initSqlJs({locateFile:()=>wasmUrl});const next=new SQL.Database(bytes);for(const table of ['transactions','budgets','goals','settings']){const exists=next.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='"+table+"'");if(!exists.length){next.close();throw Error('Invalid Folio backup')}}const old=db;db=next;try{await persist();old.close()}catch(e){db=old;next.close();throw e}}
